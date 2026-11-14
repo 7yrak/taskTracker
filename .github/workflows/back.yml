@@ -1,14 +1,19 @@
-name: CI
+name: Back
 on:
   push:
     branches: [main, 'codex/**']
+    paths: ['back/**', '.github/workflows/back.yml']
   pull_request:
     branches: [main]
+    paths: ['back/**', '.github/workflows/back.yml']
 permissions:
   contents: read
 jobs:
   verify:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: back
     steps:
       - uses: actions/checkout@v7
         with:
@@ -18,4 +23,5 @@ jobs:
           distribution: temurin
           java-version: '21'
           cache: maven
+          cache-dependency-path: back/pom.xml
       - run: mvn -B -ntp package
