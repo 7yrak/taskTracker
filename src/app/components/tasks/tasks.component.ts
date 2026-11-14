@@ -1,8 +1,10 @@
+import { MatCheckboxModule } from '@angular/material/checkbox';
+import { TaskBulkDialogComponent } from '../shared/task-bulk-dialog/task-bulk-dialog.component';
 import { RowDrag } from '../../shared/row-drag';
 import { Component, inject, signal, ChangeDetectorRef, ViewChild, ElementRef, DestroyRef, computed, ViewChildren, QueryList, AfterViewInit } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule, ReactiveFormsModule, FormBuilder, Validators } from '@angular/forms';
-import { Subject, Subscription } from 'rxjs';
+import { Subject, Subscription, firstValueFrom } from 'rxjs';
 import { filter, startWith, switchMap, take } from 'rxjs/operators';
 import { takeUntilDestroyed, toObservable, toSignal } from '@angular/core/rxjs-interop';
 import { MatTableModule, MatTableDataSource } from '@angular/material/table';
@@ -18,8 +20,7 @@ import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatMenuModule } from '@angular/material/menu';
 import { MatButtonToggleModule } from '@angular/material/button-toggle';
 import { CdkDragDrop, moveItemInArray, transferArrayItem, CdkDropList, CdkDrag, CdkDropListGroup } from '@angular/cdk/drag-drop';
-import { jsPDF } from 'jspdf';
-import autoTable from 'jspdf-autotable';
+import { ReportPdf } from '../../shared/report-pdf';
 import { TaskService, ImportResult } from '../../services/task.service';
 import { TaskFilterService, TaskViewPreset, PersistedSortState } from '../../services/task-filter.service';
 import { ProjectService } from '../../services/project.service';
@@ -61,11 +62,11 @@ type TaskTableColumn = keyof TaskTableColumnWidths;
 const TASK_TABLE_COLUMN_WIDTHS_STORAGE_KEY = 'tasks.tableColumnWidths.v3';
 
 const DEFAULT_TASK_TABLE_COLUMN_WIDTHS: TaskTableColumnWidths = {
-  title: 500,
+  title: 380,
   project: 120,
   assignee: 120,
-  status: 135,
-  priority: 90,
+  status: 160,
+  priority: 108,
   startDate: 64,
   dueDate: 78,
   progressActual: 64,
@@ -77,8 +78,8 @@ const MIN_TASK_TABLE_COLUMN_WIDTHS: TaskTableColumnWidths = {
   title: 260,
   project: 100,
   assignee: 100,
-  status: 125,
-  priority: 84,
+  status: 150,
+  priority: 100,
   startDate: 60,
   dueDate: 72,
   progressActual: 60,
@@ -107,7 +108,7 @@ import { TASK_PRIORITIES, TASK_STATUSES, parseIsoDateLike, formatDateYmd } from 
     CommonModule, FormsModule,
     ReactiveFormsModule,
     MatTableModule, MatSortModule,
-    MatButtonModule, MatIconModule,
+    MatButtonModule, MatIconModule, MatCheckboxModule,
     MatDialogModule, MatSelectModule, MatFormFieldModule,
     MatInputModule,
     MatSnackBarModule, MatTooltipModule, MatMenuModule, MatButtonToggleModule,
@@ -199,12 +200,13 @@ export class TasksComponent implements AfterViewInit {
   dataSource = new MatTableDataSource<TaskNode>([]);
   taskCount  = signal(0);
 
-  projects = toSignal(this.projectService.getAll(), { initialValue: [] as Project[] });
+  projects = toSignal(this.refresh$.pipe(startWith(undefined), switchMap(() => this.projectService.getAll())), { initialValue: [] as Project[] });
   members  = toSignal(this.memberService.getAll(),  { initialValue: [] as Member[]  });
   columnWidths = signal<TaskTableColumnWidths>(this.loadColumnWidths());
   tableStyleVars = computed(() => this.buildTableStyleVars(this.columnWidths()));
 
   displayedColumns = [
+    'select',
     'title',
     'project',
     'assignee',
@@ -242,7 +244,7 @@ export class TasksComponent implements AfterViewInit {
 
   constructor() {
     toObservable(this.projects).pipe(
-      filter(p => p.length > 0), take(1), takeUntilDestroyed(this.destroyRef)
+      filter(p => p.length > 0), takeUntilDestroyed(this.destroyRef)
     ).subscribe(p => {
       if (!this.filterService.projectsInitialized) {
         this.filterService.projectsInitialized = true;
@@ -281,6 +283,7 @@ export class TasksComponent implements AfterViewInit {
   setViewMode(mode: 'table' | 'kanban') {
     this.viewMode = mode;
     this.filterService.saveViewMode(mode);
+    this.reconcileSelection();
   }
 
   saveCurrentView() {
@@ -595,6 +598,7 @@ export class TasksComponent implements AfterViewInit {
         this.kanbanTasks[task.status].push(task);
       }
     }
+    this.reconcileSelection();
   }
 
   drop(event: CdkDragDrop<TaskNode[]>) {
@@ -750,6 +754,7 @@ export class TasksComponent implements AfterViewInit {
     // Volvemos a filtrar y aplanar para mantener el filtro y recalcular hijos
     const filtered = this.filterTree(this.rootNodes);
     this.dataSource.data = this.flatten(filtered);
+    this.reconcileSelection();
   }
 
   hasExpandableTasks(): boolean {
@@ -766,6 +771,7 @@ export class TasksComponent implements AfterViewInit {
     this.setExpandedRecursive(this.rootNodes, expand);
     const filtered = this.filterTree(this.rootNodes);
     this.dataSource.data = this.flatten(filtered);
+    this.reconcileSelection();
   }
 
   private hasChildrenRecursive(node: TaskNode): boolean {
@@ -808,6 +814,36 @@ export class TasksComponent implements AfterViewInit {
 
   trackById(index: number, node: TaskNode): number {
     return node.id;
+  }
+
+  selectedTaskIds = signal<Set<number>>(new Set());
+  selectableTasks(): TaskNode[] {
+    return (this.viewMode === 'table' ? this.dataSource.data : Object.values(this.kanbanTasks).flat()).filter(t => !t.hasChildren);
+  }
+  allVisibleSelected(): boolean {
+    const tasks = this.selectableTasks();
+    return tasks.length > 0 && tasks.every(t => this.selectedTaskIds().has(t.id));
+  }
+  selectTask(id: number, checked: boolean) {
+    this.selectedTaskIds.update(old => { const next = new Set(old); checked ? next.add(id) : next.delete(id); return next; });
+  }
+  selectVisibleTasks(checked: boolean) {
+    this.selectedTaskIds.set(new Set(checked ? this.selectableTasks().slice(0, 500).map(t => t.id) : []));
+  }
+  private reconcileSelection() {
+    const visibleIds = new Set(this.selectableTasks().map(t => t.id));
+    this.selectedTaskIds.update(old => new Set([...old].filter(id => visibleIds.has(id))));
+  }
+  openBulkEdit() {
+    if (this.editingTaskId() !== null || this.editingTitleId() !== null || this.hierarchyBusy()) {
+      this.openInfoSnack('Guarda o cancela la edición actual antes de editar en lote', 'warning'); return;
+    }
+    const tasks = this.selectableTasks().filter(t => this.selectedTaskIds().has(t.id));
+    if (!tasks.length || tasks.length > 500) return;
+    this.dialog.open(TaskBulkDialogComponent, { width: '760px', maxWidth: '96vw', maxHeight: '94vh', data: { tasks, members: this.members() } })
+      .afterClosed().pipe(takeUntilDestroyed(this.destroyRef)).subscribe(result => {
+        if (result) { this.selectedTaskIds.set(new Set()); this.refresh$.next(); this.openInfoSnack(`${result.length} ${result.length === 1 ? 'tarea actualizada' : 'tareas actualizadas'}`, 'success'); }
+      });
   }
 
   // ── CRUD ──────────────────────────────────────────────────────────────────
@@ -1280,53 +1316,30 @@ export class TasksComponent implements AfterViewInit {
     });
   }
 
-  exportView() {
-    const visibleTasks = this.dataSource.data;
-    if (visibleTasks.length === 0) {
+  exportingExcel = false;
+  async exportView() {
+    if (this.exportingExcel) return;
+    const visibleTasks = [...this.dataSource.data];
+    if (!visibleTasks.length) {
       this.openInfoSnack('No hay tareas en la vista actual para exportar', 'warning');
       return;
     }
-
-    const headers = ['Título', 'Proyecto', 'Asignado a', 'Estado', 'Prioridad', 'Inicio', 'Vencimiento', '% Real', '% Esperado'];
-
-    const rows = visibleTasks.map(node => {
-      const prefix = '  '.repeat(node.level || 0);
-
-      const title = `${prefix}${node.title}`;
-      const project = node.projectName ?? '';
-      const assignee = node.assigneeNames?.join(', ') ?? '';
-      const status = this.statusLabels[node.status] ?? node.status;
-      const priority = this.priorityLabels[node.priority] ?? node.priority;
-
-      const startDate = node.startDate ? this.parseLocalDate(node.startDate)?.toLocaleDateString('es-ES') : '';
-      const dueDate = node.dueDate ? this.parseLocalDate(node.dueDate)?.toLocaleDateString('es-ES') : '';
-
-      const progressActual = node.progressActual != null ? `${node.progressActual}%` : '';
-      const progressExpected = node.progressExpected != null ? `${node.progressExpected}%` : '';
-
-      const rowData = [title, project, assignee, status, priority, startDate, dueDate, progressActual, progressExpected];
-
-      const escapeCsv = (val: string | undefined) => {
-        const strVal = String(val ?? '');
-        if (/[";\n\r]/.test(strVal)) {
-          return `"${strVal.replace(/"/g, '""')}"`;
-        }
-        return strVal;
-      };
-
-      return rowData.map(escapeCsv).join(';');
-    });
-
-    const csvContent = '\uFEFF' + [headers.join(';'), ...rows].join('\n');
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const today = this.formatLocalDate(new Date());
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `tasktracker_tasks_view_${today}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
-    this.openInfoSnack(`Exportando ${visibleTasks.length} tareas de la vista...`, 'info');
+    this.exportingExcel = true;
+    try {
+      const blob = await firstValueFrom(this.taskService.exportView(visibleTasks.map(t => ({ id: t.id, level: t.level || 0 }))));
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `tasktracker_tareas_${this.formatLocalDate(new Date())}.xlsx`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      this.openInfoSnack(`Excel generado con ${visibleTasks.length} tareas`, 'info');
+    } catch {
+      this.openInfoSnack('No se pudo generar el Excel. Vuelve a intentarlo.', 'warning');
+    } finally {
+      this.exportingExcel = false;
+      this.hierarchyChange.markForCheck();
+    }
   }
 
   exportPdf() {
@@ -1336,12 +1349,15 @@ export class TasksComponent implements AfterViewInit {
       return;
     }
 
-    const doc = new jsPDF({ orientation: 'landscape' });
+    const report = new ReportPdf('Vista de tareas', 'Vista actual: se conserva el orden y la jerarquía de las tareas.', [
+      { label: 'Tareas en la vista', value: visibleTasks.length },
+      { label: 'Completadas', value: visibleTasks.filter(t => t.status === 'DONE').length },
+      { label: 'Bloqueadas', value: visibleTasks.filter(t => t.status === 'BLOCKED').length },
+    ]);
     const head = [['Título', 'Proyecto', 'Asignado', 'Estado', 'Prioridad', 'Inicio', 'Venc.', '% Real', '% Esp.']];
 
     const body = visibleTasks.map(node => {
-      const prefix = '  '.repeat(node.level || 0);
-      const title = `${prefix}${node.title}`;
+      const title = node.title;
       const project = node.projectName ?? '';
       const assignee = node.assigneeNames?.join(', ') ?? '';
       const status = this.statusLabels[node.status] ?? node.status;
@@ -1354,26 +1370,22 @@ export class TasksComponent implements AfterViewInit {
       return [title, project, assignee, status, priority, startDate, dueDate, progressActual, progressExpected];
     });
 
-    autoTable(doc, {
-      head: head,
-      body: body,
-      theme: 'grid',
-      styles: { fontSize: 8, cellPadding: 2, overflow: 'linebreak' },
-      headStyles: { fillColor: [44, 62, 80], textColor: 255, fontStyle: 'bold' },
-      columnStyles: { 0: { cellWidth: 60 }, 1: { cellWidth: 25 }, 2: { cellWidth: 30 } },
-      didDrawPage: (data: { settings: { margin: { left: number } }; pageNumber: number }) => {
-        doc.setFontSize(18);
-        doc.setTextColor(40);
-        doc.text('Vista de Tareas', data.settings.margin.left, 15);
-        const pageCount = (doc as { getNumberOfPages: () => number }).getNumberOfPages();
-        doc.setFontSize(10);
-        doc.text(`Página ${data.pageNumber} de ${pageCount}`, data.settings.margin.left, doc.internal.pageSize.getHeight() - 10);
+    report.table('Detalle de tareas', head[0], body, {
+      styles: { font: 'helvetica', fontSize: 8, cellPadding: 2.5, overflow: 'linebreak', textColor: [12, 46, 66] },
+      columnStyles: { 0: { cellWidth: 65 }, 1: { cellWidth: 32 }, 2: { cellWidth: 34 },
+        5: { cellWidth: 23 }, 6: { cellWidth: 23 }, 7: { halign: 'right' }, 8: { halign: 'right' } },
+      didParseCell: data => {
+        if (data.section !== 'body') return;
+        const task = visibleTasks[data.row.index];
+        if (!task) return;
+        if (data.column.index === 0) data.cell.styles.cellPadding = { top: 3, bottom: 3, right: 3, left: 3 + (task.level || 0) * 3 };
+        if (data.column.index === 3 && task.status === 'BLOCKED') data.cell.styles.textColor = [185, 28, 28];
+        if (data.column.index === 3 && task.status === 'DONE') data.cell.styles.textColor = [22, 101, 52];
       },
-      margin: { top: 20 },
     });
 
     const today = this.formatLocalDate(new Date());
-    doc.save(`tasktracker_tasks_view_${today}.pdf`);
+    report.finish().save(`tasktracker_tareas_${today}.pdf`);
   }
 
   exportTasks() {

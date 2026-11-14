@@ -12,6 +12,9 @@ export interface ImportResult {
 
 @Injectable({ providedIn: 'root' })
 export class TaskService {
+  bulkUpdate(request: import('../models/task.model').TaskBulkUpdateRequest): Observable<Task[]> {
+    return this.http.patch<Task[]>(`${this.base}/bulk`, request);
+  }
   private http = inject(HttpClient);
   private base = `${API_BASE_URL}/tasks`;
 
@@ -76,5 +79,9 @@ export class TaskService {
 
   exportExcel(): Observable<Blob> {
     return this.http.get(`${this.base}/export`, { responseType: 'blob' });
+  }
+
+  exportView(rows: { id: number; level: number }[]): Observable<Blob> {
+    return this.http.post(`${this.base}/export/view`, rows, { responseType: 'blob' });
   }
 }

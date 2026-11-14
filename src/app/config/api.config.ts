@@ -1,7 +1,10 @@
 import {isKovaInstancePath} from '../core/instance-path';
-// The pilot uses its own same-origin API and database.
+// Las instancias KOVA usan su propia API y base de datos en el mismo origen;
+// el resto usa el host que sirve el frontend (red local y Tailscale).
 const base = new URL(document.querySelector('base')?.href || '/', window.location.origin);
-const pilot = isKovaInstancePath(base.pathname);
-const apiUrl = pilot ? new URL('api', base) : new URL('/api', window.location.origin);
-if (!pilot) apiUrl.port = '8081';
+const apiUrl = isKovaInstancePath(base.pathname)
+  ? new URL('api', base)
+  : base.pathname === '/tasktracker/'
+    ? new URL('/tasktracker-api', window.location.origin)
+    : new URL('api', base);
 export const API_BASE_URL = apiUrl.toString();
