@@ -1,14 +1,19 @@
-name: CI
+name: Front
 on:
   push:
     branches: [main, 'codex/**']
+    paths: ['front/**', '.github/workflows/front.yml']
   pull_request:
     branches: [main]
+    paths: ['front/**', '.github/workflows/front.yml']
 permissions:
   contents: read
 jobs:
   verify:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: front
     env:
       NG_CLI_ANALYTICS: 'false'
     steps:
@@ -19,6 +24,7 @@ jobs:
         with:
           node-version: '22'
           cache: npm
+          cache-dependency-path: front/package-lock.json
       - run: npm ci --no-audit --no-fund
       - run: node --test tests/*.test.cjs
       - run: npm run build -- --base-href=/tasktracker/

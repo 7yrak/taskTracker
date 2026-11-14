@@ -2,11 +2,15 @@ name: Customer instance frontend
 on:
   push:
     branches: [codex/customer-instances]
+    paths: ['front/**', '.github/workflows/customer-front.yml']
 permissions:
   contents: read
 jobs:
   verify:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: front
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7

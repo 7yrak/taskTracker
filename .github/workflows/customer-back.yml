@@ -2,11 +2,15 @@ name: Customer instance security
 on:
   push:
     branches: [codex/customer-instances]
+    paths: ['back/**', '.github/workflows/customer-back.yml']
 permissions:
   contents: read
 jobs:
   verify:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: back
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
