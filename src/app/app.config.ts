@@ -1,7 +1,7 @@
 import { ApplicationConfig, provideBrowserGlobalErrorListeners, LOCALE_ID } from '@angular/core';
 import { provideRouter } from '@angular/router';
 import { provideHttpClient, withInterceptors } from '@angular/common/http';
-import { authInterceptor } from './core/auth';
+import { accessInterceptor } from './core/access';
 import { provideAnimationsAsync } from '@angular/platform-browser/animations/async';
 import { DateAdapter, MAT_DATE_FORMATS, MAT_DATE_LOCALE } from '@angular/material/core';
 import { MatPaginatorIntl } from '@angular/material/paginator';
@@ -27,7 +27,7 @@ export const appConfig: ApplicationConfig = {
   providers: [
     provideBrowserGlobalErrorListeners(),
     provideRouter(routes),
-    provideHttpClient(withInterceptors([authInterceptor])),
+    provideHttpClient(withInterceptors([accessInterceptor])),
     provideAnimationsAsync(),
     { provide: LOCALE_ID, useValue: 'es-AR' },
     { provide: MAT_DATE_LOCALE, useValue: 'es-AR' },

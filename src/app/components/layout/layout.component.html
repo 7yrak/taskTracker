@@ -18,6 +18,11 @@
     </nav>
 
     <div class="topbar-actions">
+      @if (kova.pilot) {
+        <span>{{ kova.account()?.organizationName }}</span>
+        <a mat-button href="/kova/portal">KOVA</a>
+        <button mat-button (click)="logout()">Cerrar sesión</button>
+      }
       <button mat-icon-button
               class="theme-toggle"
               type="button"
@@ -26,17 +31,19 @@
               [matTooltip]="theme.isDark() ? 'Modo claro' : 'Modo oscuro'">
         <mat-icon>{{ theme.isDark() ? 'light_mode' : 'dark_mode' }}</mat-icon>
       </button>
-      <button type="button" class="user-chip" [matMenuTriggerFor]="userMenu" aria-label="Menú de usuario">
-        <span class="avatar" aria-hidden="true">{{ initial }}</span>
-        <span class="user-name">{{ auth.account()?.username }}</span>
-        <mat-icon aria-hidden="true">expand_more</mat-icon>
-      </button>
-      <mat-menu #userMenu="matMenu" xPosition="before">
-        <button mat-menu-item type="button" (click)="logout()">
-          <mat-icon>logout</mat-icon>
-          <span>Cerrar sesión</span>
+      @if (!kova.pilot) {
+        <button type="button" class="user-chip" [matMenuTriggerFor]="userMenu" aria-label="Menú de usuario">
+          <span class="avatar" aria-hidden="true">{{ initial }}</span>
+          <span class="user-name">{{ auth.account()?.username }}</span>
+          <mat-icon aria-hidden="true">expand_more</mat-icon>
         </button>
-      </mat-menu>
+        <mat-menu #userMenu="matMenu" xPosition="before">
+          <button mat-menu-item type="button" (click)="logout()">
+            <mat-icon>logout</mat-icon>
+            <span>Cerrar sesión</span>
+          </button>
+        </mat-menu>
+      }
     </div>
   </header>
 

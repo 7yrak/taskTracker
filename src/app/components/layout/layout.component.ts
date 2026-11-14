@@ -1,4 +1,5 @@
 import { Component, inject } from '@angular/core';
+import { Observable } from 'rxjs';
 import { Auth } from '../../core/auth';
 import { Router, RouterOutlet, RouterLink, RouterLinkActive } from '@angular/router';
 import { MatToolbarModule } from '@angular/material/toolbar';
@@ -6,6 +7,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatButtonModule } from '@angular/material/button';
 import { MatMenuModule } from '@angular/material/menu';
 import { MatTooltipModule } from '@angular/material/tooltip';
+import { KovaAuth } from '../../core/kova-auth';
 import { ThemeService } from '../../services/theme.service';
 import { LogoComponent } from '../shared/logo/logo.component';
 
@@ -23,6 +25,7 @@ import { LogoComponent } from '../shared/logo/logo.component';
 export class LayoutComponent {
   theme = inject(ThemeService);
   readonly auth = inject(Auth);
+  readonly kova = inject(KovaAuth);
   private router = inject(Router);
 
   get initial(): string {
@@ -30,7 +33,8 @@ export class LayoutComponent {
   }
 
   logout() {
-    this.auth.logout().subscribe({ next: () => void this.router.navigateByUrl('/acceso') });
+    const done: Observable<unknown> = this.kova.pilot ? this.kova.logout() : this.auth.logout();
+    done.subscribe({ next: () => void this.router.navigateByUrl('/acceso') });
   }
 
   navItems = [

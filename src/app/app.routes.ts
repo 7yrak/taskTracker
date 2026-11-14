@@ -1,14 +1,19 @@
 import { Routes } from '@angular/router';
-import { authGuard } from './core/auth';
+import { accessGuard } from './core/access';
+import { isKovaInstancePath } from './core/instance-path';
 import { LayoutComponent } from './components/layout/layout.component';
 
+const kovaInstance = isKovaInstancePath(new URL(document.baseURI).pathname);
+
 export const routes: Routes = [
-  { path: 'acceso', loadComponent: () => import('./components/login/login.component').then(m => m.LoginComponent) },
+  { path: 'acceso', loadComponent: () => kovaInstance
+      ? import('./components/kova-login.component').then(m => m.KovaLogin)
+      : import('./components/login/login.component').then(m => m.LoginComponent) },
   {
     path: '',
     component: LayoutComponent,
-    canActivate: [authGuard],
-    canActivateChild: [authGuard],
+    canActivate: [accessGuard],
+    canActivateChild: [accessGuard],
     children: [
       { path: '', redirectTo: 'dashboard', pathMatch: 'full' },
       {
