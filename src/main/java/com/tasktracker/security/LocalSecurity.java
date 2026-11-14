@@ -24,6 +24,7 @@ import org.springframework.security.web.savedrequest.NullRequestCache;
  * (variables de entorno), nunca del repositorio. La API privada exige sesión y CSRF.
  */
 @Configuration
+@org.springframework.context.annotation.Profile("!kova")
 public class LocalSecurity {
     @org.springframework.beans.factory.annotation.Value("${SHARED_PORTAL_KEY:}") private String sharedPortalKey;
     @org.springframework.beans.factory.annotation.Value("${tasktracker.auth.username:}") private String portalLocalUser;
