@@ -21,6 +21,7 @@ public class OvertimeService {
   return all();
  }
  @Transactional(readOnly=true) public List<OvertimeDTO> all() { return entries.findAllByOrderByDateDescIdDesc().stream().map(this::dto).toList(); }
+ @Transactional(readOnly=true) public List<OvertimeDTO> forProject(Long id) { return entries.findByProjectIdOrderByDateDescIdDesc(id).stream().map(this::dto).toList(); }
  public OvertimeDTO save(Long id,OvertimeRequest r) {
   OvertimeEntry e=id==null?new OvertimeEntry():entries.findById(id).orElseThrow(()->new NoSuchElementException("Registro no encontrado"));
   e.setProject(projects.findById(r.projectId()).orElseThrow(()->new IllegalArgumentException("Proyecto no encontrado")));
@@ -41,12 +42,14 @@ public class OvertimeService {
    var headerStyle = book.createCellStyle();
    var font = book.createFont(); font.setBold(true); headerStyle.setFont(font);
    for(int c=0;c<headers.length;c++) { var cell=header.createCell(c); cell.setCellValue(headers[c]); cell.setCellStyle(headerStyle); }
+   var dateStyle = book.createCellStyle(); dateStyle.setDataFormat(book.createDataFormat().getFormat("dd/mm/yyyy"));
+   var hoursStyle = book.createCellStyle(); hoursStyle.setDataFormat(book.createDataFormat().getFormat("0.00"));
    int index=1; double total=0;
    for(var entry:rows) {
     var row=sheet.createRow(index++);
-    row.createCell(0).setCellValue(entry.date().toString());
+    row.createCell(0).setCellValue(entry.date()); row.getCell(0).setCellStyle(dateStyle);
     row.createCell(1).setCellValue(entry.person());
-    row.createCell(2).setCellValue(entry.hours().doubleValue());
+    row.createCell(2).setCellValue(entry.hours().doubleValue()); row.getCell(2).setCellStyle(hoursStyle);
     row.createCell(3).setCellValue(entry.topic());
     row.createCell(4).setCellValue(entry.projectName());
     row.createCell(5).setCellValue(entry.sentToManagement() ? "Sí" : "No");
@@ -55,7 +58,10 @@ public class OvertimeService {
    var footer=sheet.createRow(index); footer.createCell(1).setCellValue("Total horas"); footer.createCell(2).setCellValue(Math.round(total*100)/100.0);
    sheet.createFreezePane(0,1);
    sheet.setAutoFilter(new org.apache.poi.ss.util.CellRangeAddress(0, Math.max(0,index-1),0,5));
-   for(int c=0;c<headers.length;c++) { sheet.autoSizeColumn(c); sheet.setColumnWidth(c,Math.min(15000,sheet.getColumnWidth(c)+512)); }
+   int[] widths = {16, 32, 14, 72, 36, 24};
+   for(int c=0;c<headers.length;c++) sheet.setColumnWidth(c,widths[c]*256);
+   footer.getCell(2).setCellStyle(hoursStyle);
+   ExcelReportStyle.apply(book, sheet, headers.length, "Horas extras", index);
    book.write(output); return output.toByteArray();
   }
  }
