@@ -1,0 +1,210 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// LAYOUT — Barra superior compacta para ganar ancho útil en pantallas de trabajo
+// ─────────────────────────────────────────────────────────────────────────────
+
+:host {
+  display: block;
+  height: 100vh;
+}
+
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg-app);
+}
+
+.app-topbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-height: 64px;
+  padding: 10px 20px;
+  background: color-mix(in srgb, var(--bg-card) 88%, transparent);
+  backdrop-filter: saturate(160%) blur(12px);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  transition: background var(--transition), border-color var(--transition);
+}
+
+.brand-link {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  text-decoration: none;
+  color: inherit;
+  font-size: 17px;
+  font-weight: 700;
+  border-radius: var(--radius-sm);
+}
+
+.top-nav {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  padding: 4px 8px;
+  scrollbar-width: none;
+
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+.nav-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: auto;
+  height: 38px;
+  padding: 0 14px;
+  border-radius: 10px;
+  color: var(--text-secondary);
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  flex-shrink: 0;
+  transition: background var(--transition), color var(--transition);
+
+  mat-icon {
+    font-size: 19px;
+    width: 19px;
+    height: 19px;
+    margin: 0;
+  }
+
+  &:hover {
+    background: var(--bg-surface-2);
+    color: var(--text-primary);
+  }
+
+  &.active-link {
+    background: var(--accent-dim);
+    color: var(--accent-text);
+    font-weight: 600;
+
+    mat-icon {
+      color: var(--accent);
+    }
+  }
+}
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.theme-toggle {
+  color: var(--text-secondary);
+  border-radius: 10px;
+  transition: background var(--transition), color var(--transition);
+
+  &:hover {
+    background: var(--bg-surface-2);
+    color: var(--text-primary);
+  }
+}
+
+.user-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 8px 0 5px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-card);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--transition), border-color var(--transition);
+
+  &:hover {
+    background: var(--bg-surface-2);
+  }
+
+  mat-icon {
+    width: 18px;
+    height: 18px;
+    font-size: 18px;
+    color: var(--text-muted);
+  }
+}
+
+.avatar {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #0C1F4A, #0094B8);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.user-name {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.content-area {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: auto;
+  background: var(--bg-app);
+
+  &.tasks-route,
+  &.overtime-route {
+    overflow: hidden;
+  }
+}
+
+@media (max-width: 900px) {
+  .content-area.tasks-route { overflow:auto; }
+  .app-topbar {
+    flex-wrap: wrap;
+    gap: 6px 10px;
+    padding: 10px 14px 8px;
+  }
+
+  .brand-link {
+    order: 1;
+  }
+
+  .topbar-actions {
+    order: 2;
+    margin-left: auto;
+  }
+
+  .top-nav {
+    order: 3;
+    flex-basis: 100%;
+    justify-content: flex-start;
+    padding: 0;
+  }
+
+  .user-name {
+    display: none;
+  }
+
+  .user-chip {
+    padding: 0 6px 0 5px;
+  }
+}

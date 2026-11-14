@@ -1,0 +1,86 @@
+export type TaskStatus = 'TODO' | 'IN_PROGRESS' | 'IN_REVIEW' | 'DONE' | 'BLOCKED' | 'STOPPED';
+export type TaskPriority = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+
+export interface TaskBulkUpdateRequest {
+  taskIds: number[];
+  status?: TaskStatus;
+  priority?: TaskPriority;
+  updateAssignees?: boolean;
+  assigneeIds?: number[];
+  updateStartDate?: boolean;
+  startDate?: string | null;
+  updateDueDate?: boolean;
+  dueDate?: string | null;
+}
+
+export interface TaskComment {
+  id?: number;
+  author: string;
+  text: string;
+  date: Date | string;
+}
+
+export interface TaskCommentRequest {
+  author?: string;
+  text: string;
+  date?: Date | string;
+}
+
+export interface Task {
+  id: number;
+  title: string;
+  description?: string;
+  status: TaskStatus;
+  priority: TaskPriority;
+  projectId?: number;
+  projectName?: string;
+  projectColor?: string;
+  assigneeIds?: number[];
+  assigneeNames?: string[];
+  startDate?: string;
+  dueDate?: string;
+  createdAt: string;
+  updatedAt: string;
+  progressActual: number;
+  progressExpected?: number | null;
+  parentId?: number | null;
+  hasChildren: boolean;
+  comments?: TaskComment[];
+}
+
+export interface TaskNode extends Task {
+  level: number;
+  expanded: boolean;
+  childrenNodes: TaskNode[];
+  hierarchyPath?: string[];
+}
+
+export interface TaskRequest {
+  title: string;
+  description?: string;
+  status?: TaskStatus;
+  priority?: TaskPriority;
+  projectId?: number;
+  assigneeIds?: number[];
+  startDate?: string;
+  dueDate?: string;
+  progressActual?: number;
+  parentId?: number | null;
+  comments?: TaskCommentRequest[];
+}
+
+export const STATUS_LABELS: Record<TaskStatus, string> = {
+  TODO: 'Pendiente',
+  IN_PROGRESS: 'En progreso',
+  IN_REVIEW: 'En revisión',
+  DONE: 'Completada',
+  BLOCKED: 'Bloqueada',
+  STOPPED: 'Detenido'
+};
+
+export const PRIORITY_LABELS: Record<TaskPriority, string> = {
+  LOW: 'Baja',
+  MEDIUM: 'Media',
+  HIGH: 'Alta',
+  CRITICAL: 'Crítica'
+};

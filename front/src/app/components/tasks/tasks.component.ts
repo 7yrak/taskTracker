@@ -1,0 +1,1504 @@
+import { MatCheckboxModule } from '@angular/material/checkbox';
+import { TaskBulkDialogComponent } from '../shared/task-bulk-dialog/task-bulk-dialog.component';
+import { RowDrag } from '../../shared/row-drag';
+import { Component, inject, signal, ChangeDetectorRef, ViewChild, ElementRef, DestroyRef, computed, ViewChildren, QueryList, AfterViewInit } from '@angular/core';
+import { CommonModule } from '@angular/common';
+import { FormsModule, ReactiveFormsModule, FormBuilder, Validators } from '@angular/forms';
+import { Subject, Subscription, firstValueFrom } from 'rxjs';
+import { filter, startWith, switchMap, take } from 'rxjs/operators';
+import { takeUntilDestroyed, toObservable, toSignal } from '@angular/core/rxjs-interop';
+import { MatTableModule, MatTableDataSource } from '@angular/material/table';
+import { MatSortModule, Sort } from '@angular/material/sort';
+import { MatButtonModule } from '@angular/material/button';
+import { MatIconModule } from '@angular/material/icon';
+import { MAT_DIALOG_DATA, MatDialogModule, MatDialog } from '@angular/material/dialog';
+import { MatInputModule } from '@angular/material/input';
+import { MatSelectModule } from '@angular/material/select';
+import { MatFormFieldModule } from '@angular/material/form-field';
+import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
+import { MatTooltipModule } from '@angular/material/tooltip';
+import { MatMenuModule } from '@angular/material/menu';
+import { MatButtonToggleModule } from '@angular/material/button-toggle';
+import { CdkDragDrop, moveItemInArray, transferArrayItem, CdkDropList, CdkDrag, CdkDropListGroup } from '@angular/cdk/drag-drop';
+import { ReportPdf } from '../../shared/report-pdf';
+import { TaskService, ImportResult } from '../../services/task.service';
+import { TaskFilterService, TaskViewPreset, PersistedSortState } from '../../services/task-filter.service';
+import { ProjectService } from '../../services/project.service';
+import { MemberService } from '../../services/member.service';
+import { Task, TaskNode, TaskStatus, TaskPriority, TaskRequest, STATUS_LABELS, PRIORITY_LABELS } from '../../models/task.model';
+import { Project, ProjectStatus } from '../../models/project.model';
+import { Member } from '../../models/member.model';
+import { TaskDialogComponent } from '../shared/task-dialog/task-dialog.component';
+import { ConfirmDialogComponent } from '../shared/confirm-dialog/confirm-dialog.component';
+import { TaskCommentsDialogComponent } from '../shared/task-comments-dialog/task-comments-dialog.component';
+
+interface TaskEditFormValue {
+  title: string;
+  description: string;
+  projectId: number | null;
+  parentId: number | null;
+  status: TaskStatus;
+  priority: TaskPriority;
+  assigneeIds: number[];
+  startDate: string | null;
+  dueDate: string | null;
+  progressActual: number;
+}
+interface TaskTableColumnWidths {
+  title: number;
+  project: number;
+  assignee: number;
+  status: number;
+  priority: number;
+  startDate: number;
+  dueDate: number;
+  progressActual: number;
+  progressExpected: number;
+  actions: number;
+}
+
+type TaskTableColumn = keyof TaskTableColumnWidths;
+
+const TASK_TABLE_COLUMN_WIDTHS_STORAGE_KEY = 'tasks.tableColumnWidths.v3';
+
+const DEFAULT_TASK_TABLE_COLUMN_WIDTHS: TaskTableColumnWidths = {
+  title: 380,
+  project: 120,
+  assignee: 120,
+  status: 160,
+  priority: 108,
+  startDate: 64,
+  dueDate: 78,
+  progressActual: 64,
+  progressExpected: 74,
+  actions: 112
+};
+
+const MIN_TASK_TABLE_COLUMN_WIDTHS: TaskTableColumnWidths = {
+  title: 260,
+  project: 100,
+  assignee: 100,
+  status: 150,
+  priority: 100,
+  startDate: 60,
+  dueDate: 72,
+  progressActual: 60,
+  progressExpected: 68,
+  actions: 108
+};
+
+function normalizeTaskTableColumnWidths(raw: Partial<TaskTableColumnWidths> | null | undefined): TaskTableColumnWidths {
+  const widths: TaskTableColumnWidths = { ...DEFAULT_TASK_TABLE_COLUMN_WIDTHS };
+
+  (Object.keys(widths) as TaskTableColumn[]).forEach(column => {
+    const value = Number(raw?.[column]);
+    if (Number.isFinite(value)) {
+      widths[column] = Math.max(MIN_TASK_TABLE_COLUMN_WIDTHS[column], Math.round(value));
+    }
+  });
+
+  return widths;
+}
+import { TASK_PRIORITIES, TASK_STATUSES, parseIsoDateLike, formatDateYmd } from '../../shared/task-ui-utils';
+
+
+@Component({
+  selector: 'app-tasks',
+  imports: [
+    CommonModule, FormsModule,
+    ReactiveFormsModule,
+    MatTableModule, MatSortModule,
+    MatButtonModule, MatIconModule, MatCheckboxModule,
+    MatDialogModule, MatSelectModule, MatFormFieldModule,
+    MatInputModule,
+    MatSnackBarModule, MatTooltipModule, MatMenuModule, MatButtonToggleModule,
+    CdkDropListGroup, CdkDropList, CdkDrag
+  ],
+  templateUrl: './tasks.component.html',
+  styleUrl: './tasks.component.scss'
+})
+export class TasksComponent implements AfterViewInit {
+  private hierarchyChange = inject(ChangeDetectorRef);
+  rowDrag = new RowDrag('tasks');
+  startRowPointer(event: PointerEvent, row: TaskNode) {
+    this.rowDrag.pointerStart(
+      event,
+      row.id,
+      this.hierarchyBusy() || this.editingTaskId() === row.id,
+      (id, parent, project) => this.moveHierarchyRow(id, parent, project),
+      () => this.hierarchyChange.markForCheck(),
+    );
+  }
+  moveHierarchyRow(id: number, parentId: number | null, projectId: number | null) {
+    if (this.hierarchyBusy()) return;
+    this.hierarchyBusy.set(true);
+    this.taskService.moveHierarchy(id, parentId, projectId).subscribe({
+      next: () => {
+        this.hierarchyBusy.set(false);
+        this.refresh$.next();
+        this.openInfoSnack('Jerarquía y proyecto actualizados', 'success');
+      },
+      error: (e) => {
+        this.hierarchyBusy.set(false);
+        this.openInfoSnack(e.error?.message || 'No se pudo mover la fila', 'error');
+      },
+    });
+  }
+  hierarchyBusy = signal(false);
+  dropRow(event: DragEvent, parentId: number | null, projectId: number | null) {
+    const id = this.rowDrag.take(event);
+    if (id === null || id === parentId || this.hierarchyBusy()) return;
+    this.moveHierarchyRow(id, parentId, projectId);
+  }
+
+  detachRow(row: TaskNode) {
+    this.hierarchyBusy.set(true);
+    this.taskService.moveHierarchy(row.id, null, row.projectId ?? null).subscribe({
+      next: () => {
+        this.hierarchyBusy.set(false);
+        this.refresh$.next();
+      },
+      error: (e) => {
+        this.hierarchyBusy.set(false);
+        this.openInfoSnack(e.error?.message || 'No se pudo mover', 'error');
+      },
+    });
+  }
+  @ViewChild('fileInput')  fileInputRef!: ElementRef<HTMLInputElement>;
+  @ViewChildren('titleInput') titleInputRefs!: QueryList<ElementRef<HTMLInputElement>>;
+
+  private taskService    = inject(TaskService);
+  private filterService  = inject(TaskFilterService);
+  private projectService = inject(ProjectService);
+  private memberService  = inject(MemberService);
+  private fb             = inject(FormBuilder);
+  private dialog         = inject(MatDialog);
+  private snack          = inject(MatSnackBar);
+  private destroyRef     = inject(DestroyRef);
+  private editSub        = new Subscription();
+
+  viewMode: 'table' | 'kanban' = this.filterService.loadViewMode('table');
+  savedViews = signal<TaskViewPreset[]>(this.filterService.loadSavedViews());
+  selectedViewId = signal<string>('');
+  recentlyUpdatedTaskIds = signal<Set<number>>(new Set());
+  kanbanColumns = ['TODO', 'IN_PROGRESS', 'IN_REVIEW', 'DONE', 'BLOCKED', 'STOPPED'] as TaskStatus[];
+  kanbanTasks: Record<TaskStatus, TaskNode[]> = {
+    TODO: [], IN_PROGRESS: [], IN_REVIEW: [], DONE: [], BLOCKED: [], STOPPED: []
+  };
+
+  filterProject  = this.filterService.filterProject;
+  filterStatus   = this.filterService.filterStatus;
+  filterPriority = this.filterService.filterPriority;
+  filterAssignee = this.filterService.filterAssignee;
+
+  private refresh$ = new Subject<void>();
+  private allTasks: Task[] = [];
+  private rootNodes: TaskNode[] = [];
+  private projectStatusMap = computed(() => new Map(this.projects().map(p => [p.id, p.status])));
+  activeProjects = computed(() => this.projects().filter(p => !this.isArchivedProjectStatus(p.status)));
+
+  dataSource = new MatTableDataSource<TaskNode>([]);
+  taskCount  = signal(0);
+
+  projects = toSignal(this.refresh$.pipe(startWith(undefined), switchMap(() => this.projectService.getAll())), { initialValue: [] as Project[] });
+  members  = toSignal(this.memberService.getAll(),  { initialValue: [] as Member[]  });
+  columnWidths = signal<TaskTableColumnWidths>(this.loadColumnWidths());
+  tableStyleVars = computed(() => this.buildTableStyleVars(this.columnWidths()));
+
+  displayedColumns = [
+    'select',
+    'title',
+    'project',
+    'assignee',
+    'status',
+    'priority',
+    'startDate',
+    'dueDate',
+    'progressActual',
+    'progressExpected',
+    'actions'
+  ];
+  statusLabels: Record<string, string>   = STATUS_LABELS;
+  priorityLabels: Record<string, string> = PRIORITY_LABELS;
+  statuses: TaskStatus[] = TASK_STATUSES;
+  priorities: TaskPriority[] = TASK_PRIORITIES;
+  sorts: Sort[] = this.filterService.loadSortState([{ active: 'startDate', direction: 'asc' }]);
+
+  editingTitleId = signal<number | null>(null);
+  editingTaskId = signal<number | null>(null);
+  editParentOptions: (TaskNode & { _level?: number })[] = [];
+  private resizingColumn: TaskTableColumn | null = null;
+  private resizeCleanup: (() => void) | null = null;
+  editForm = this.fb.group({
+    title: ['', Validators.required],
+    description: [''],
+    projectId: [null as number | null, Validators.required],
+    parentId: [null as number | null],
+    status: ['TODO' as TaskStatus, Validators.required],
+    priority: ['MEDIUM' as TaskPriority, Validators.required],
+    assigneeIds: [[] as number[]],
+    startDate: [null as string | null],
+    dueDate: [null as string | null],
+    progressActual: [0, [Validators.required, Validators.min(0), Validators.max(100)]]
+  });
+
+  constructor() {
+    toObservable(this.projects).pipe(
+      filter(p => p.length > 0), takeUntilDestroyed(this.destroyRef)
+    ).subscribe(p => {
+      if (!this.filterService.projectsInitialized) {
+        this.filterService.projectsInitialized = true;
+        this.filterProject.set(p.filter(x => !this.isArchivedProjectStatus(x.status)).map(x => x.id));
+      }
+      this.buildAndFilter();
+    });
+
+    toObservable(this.members).pipe(
+      filter(m => m.length > 0), take(1), takeUntilDestroyed(this.destroyRef)
+    ).subscribe(m => {
+      if (!this.filterService.membersInitialized) {
+        this.filterService.membersInitialized = true;
+        this.filterAssignee.set(m.map(x => x.id));
+      }
+      this.buildAndFilter();
+    });
+
+    // Always load all tasks — filtering is done client-side to preserve tree structure
+    this.refresh$.pipe(
+      startWith(undefined as void),
+      switchMap(() => this.taskService.getAll()),
+      takeUntilDestroyed(this.destroyRef)
+    ).subscribe(tasks => {
+      this.allTasks = tasks;
+      this.buildAndFilter();
+    });
+  }
+
+  ngOnDestroy() {
+    this.rowDrag.end();
+    this.editSub.unsubscribe();
+    this.resizeCleanup?.();
+  }
+
+  setViewMode(mode: 'table' | 'kanban') {
+    this.viewMode = mode;
+    this.filterService.saveViewMode(mode);
+    this.reconcileSelection();
+  }
+
+  saveCurrentView() {
+    const name = prompt('Nombre para la vista guardada:', `Vista ${new Date().toLocaleDateString('es-AR')}`);
+    if (!name?.trim()) return;
+
+    const preset: TaskViewPreset = {
+      id: crypto.randomUUID(),
+      name: name.trim(),
+      filterProject: [...this.filterProject()],
+      filterStatus: [...this.filterStatus()],
+      filterPriority: [...this.filterPriority()],
+      filterAssignee: [...this.filterAssignee()],
+      viewMode: this.viewMode,
+      sortState: this.sorts.map(s => ({ active: s.active, direction: s.direction as PersistedSortState['direction'] }))
+    };
+
+    this.savedViews.update(list => {
+      const next = [preset, ...list].slice(0, 10);
+      this.filterService.saveSavedViews(next);
+      return next;
+    });
+    this.selectedViewId.set(preset.id);
+    this.openInfoSnack(`Vista "${preset.name}" guardada`, 'success');
+  }
+
+  applySavedView(presetId: string) {
+    const preset = this.savedViews().find(v => v.id === presetId);
+    if (!preset) {
+      this.selectedViewId.set('');
+      return;
+    }
+    const activeProjectIds = new Set(this.activeProjects().map(p => p.id));
+    const safeProjectSelection = preset.filterProject.filter(id => activeProjectIds.has(id));
+    this.filterProject.set(safeProjectSelection.length > 0 ? safeProjectSelection : [...activeProjectIds]);
+    this.filterStatus.set([...preset.filterStatus]);
+    this.filterPriority.set([...preset.filterPriority]);
+    this.filterAssignee.set([...preset.filterAssignee]);
+    this.sorts = preset.sortState.map(s => ({ active: s.active, direction: s.direction }));
+    this.viewMode = preset.viewMode;
+    this.selectedViewId.set(presetId);
+    this.filterService.saveViewMode(preset.viewMode);
+    this.filterService.saveSortState(this.sorts.map(s => ({ active: s.active, direction: s.direction })));
+    this.buildAndFilter();
+    this.openInfoSnack(`Vista "${preset.name}" aplicada`, 'info');
+  }
+
+  deleteSavedView(presetId: string) {
+    const next = this.savedViews().filter(v => v.id !== presetId);
+    this.savedViews.set(next);
+    this.filterService.saveSavedViews(next);
+    if (this.selectedViewId() === presetId) {
+      this.selectedViewId.set('');
+    }
+    this.openInfoSnack('Vista eliminada', 'warning');
+  }
+
+  private openInfoSnack(message: string, tone: 'success' | 'warning' | 'error' | 'info' = 'info') {
+    this.snack.open(message, 'OK', {
+      duration: 2500,
+      panelClass: [`snack-${tone}`]
+    });
+  }
+
+  private flashTaskUpdate(taskId: number) {
+    this.recentlyUpdatedTaskIds.update(set => {
+      const next = new Set(set);
+      next.add(taskId);
+      return next;
+    });
+    setTimeout(() => {
+      this.recentlyUpdatedTaskIds.update(set => {
+        const next = new Set(set);
+        next.delete(taskId);
+        return next;
+      });
+    }, 1600);
+  }
+
+  isRecentlyUpdated(taskId: number): boolean {
+    return this.recentlyUpdatedTaskIds().has(taskId);
+  }
+
+  startColumnResize(column: TaskTableColumn, event: PointerEvent): void {
+    if (event.button > 0) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    const handle = event.currentTarget as HTMLElement | null;
+    if (!handle) {
+      return;
+    }
+
+    this.resizeCleanup?.();
+
+    const startX = event.clientX;
+    const startWidth = this.columnWidths()[column];
+    let active = true;
+
+    const finish = () => {
+      if (!active) {
+        return;
+      }
+      active = false;
+
+      handle.removeEventListener('pointermove', onMove);
+      handle.removeEventListener('pointerup', finish);
+      handle.removeEventListener('pointercancel', finish);
+
+      try {
+        if (handle.hasPointerCapture(event.pointerId)) {
+          handle.releasePointerCapture(event.pointerId);
+        }
+      } catch {
+        // Ignorar si el puntero ya se liberó.
+      }
+
+      this.resizingColumn = null;
+      this.saveColumnWidths(this.columnWidths());
+      this.resizeCleanup = null;
+    };
+
+    const onMove = (moveEvent: PointerEvent) => {
+      if (moveEvent.pointerId !== event.pointerId) {
+        return;
+      }
+
+      const delta = moveEvent.clientX - startX;
+      const nextWidth = this.clampColumnWidth(column, startWidth + delta);
+
+      this.columnWidths.update(current => (
+        current[column] === nextWidth ? current : { ...current, [column]: nextWidth }
+      ));
+    };
+
+    this.resizingColumn = column;
+    this.resizeCleanup = finish;
+
+    handle.addEventListener('pointermove', onMove);
+    handle.addEventListener('pointerup', finish);
+    handle.addEventListener('pointercancel', finish);
+
+    try {
+      handle.setPointerCapture(event.pointerId);
+    } catch {
+      // No todos los navegadores permiten capturar el puntero en todos los casos.
+    }
+  }
+
+  isColumnResizing(column: TaskTableColumn): boolean {
+    return this.resizingColumn === column;
+  }
+
+  ngAfterViewInit() {
+    // ViewChildren queda disponible para la edición inline de títulos.
+  }
+
+  // ── Tree building ──────────────────────────────────────────────────────────
+
+  private buildTree(tasks: Task[]): TaskNode[] {
+    const map = new Map<number, TaskNode>();
+    const roots: TaskNode[] = [];
+
+    for (const task of tasks) {
+      map.set(task.id, { ...task, level: 0, expanded: true, childrenNodes: [] });
+    }
+
+    for (const node of map.values()) {
+      if (node.parentId != null && map.has(node.parentId)) {
+        map.get(node.parentId)!.childrenNodes.push(node);
+      } else {
+        roots.push(node);
+      }
+    }
+
+    const assignLevels = (nodes: TaskNode[], level: number) => {
+      for (const n of nodes) { n.level = level; assignLevels(n.childrenNodes, level + 1); }
+    };
+    assignLevels(roots, 0);
+    return roots;
+  }
+
+  private buildTableStyleVars(widths: TaskTableColumnWidths): Record<string, string> {
+    return {
+      '--task-col-title': `${widths.title}px`,
+      '--task-col-project': `${widths.project}px`,
+      '--task-col-assignee': `${widths.assignee}px`,
+      '--task-col-status': `${widths.status}px`,
+      '--task-col-priority': `${widths.priority}px`,
+      '--task-col-startDate': `${widths.startDate}px`,
+      '--task-col-dueDate': `${widths.dueDate}px`,
+      '--task-col-progressActual': `${widths.progressActual}px`,
+      '--task-col-progressExpected': `${widths.progressExpected}px`,
+      '--task-col-actions': `${widths.actions}px`
+    };
+  }
+
+  private loadColumnWidths(): TaskTableColumnWidths {
+    try {
+      const raw = localStorage.getItem(TASK_TABLE_COLUMN_WIDTHS_STORAGE_KEY);
+      return normalizeTaskTableColumnWidths(raw ? JSON.parse(raw) as Partial<TaskTableColumnWidths> : null);
+    } catch {
+      return { ...DEFAULT_TASK_TABLE_COLUMN_WIDTHS };
+    }
+  }
+
+  private saveColumnWidths(widths: TaskTableColumnWidths): void {
+    try {
+      localStorage.setItem(TASK_TABLE_COLUMN_WIDTHS_STORAGE_KEY, JSON.stringify(widths));
+    } catch {
+      // Ignorar errores de almacenamiento en entornos restringidos.
+    }
+  }
+
+  private clampColumnWidth(column: TaskTableColumn, width: number): number {
+    return Math.max(MIN_TASK_TABLE_COLUMN_WIDTHS[column], Math.round(width));
+  }
+
+  private filterTree(nodes: TaskNode[]): TaskNode[] {
+    const result: TaskNode[] = [];
+    for (const node of nodes) {
+      const filteredChildren = this.filterTree(node.childrenNodes);
+      if (this.nodePassesFilter(node) || filteredChildren.length > 0) {
+        result.push({ ...node, childrenNodes: filteredChildren });
+      }
+    }
+    return result;
+  }
+
+  private nodePassesFilter(node: TaskNode): boolean {
+    if (this.isArchivedProjectTask(node)) {
+      return false;
+    }
+
+    const fp = this.filterProject();
+    const fs = this.filterStatus();
+    const fpr = this.filterPriority();
+    const fa = this.filterAssignee();
+
+    // Si están seleccionados todos los proyectos/miembros, no filtramos por ese campo (mostrando también los no asignados)
+    const allProjectsSelected = fp.length === 0 || fp.length === this.activeProjects().length;
+    const allAssigneesSelected = fa.length === 0 || fa.length === this.members().length;
+
+    const projectOk  = allProjectsSelected || (node.projectId != null && fp.includes(node.projectId));
+    const statusOk   = fs.length === 0 || fs.includes(node.status);
+    const priorityOk = fpr.length === 0 || fpr.includes(node.priority);
+    const assigneeOk = allAssigneesSelected ||
+      (node.assigneeIds != null && node.assigneeIds.some(id => fa.includes(id)));
+
+    return projectOk && statusOk && priorityOk && assigneeOk;
+  }
+
+  private isArchivedProjectTask(node: TaskNode): boolean {
+    if (node.projectId == null) {
+      return false;
+    }
+
+    const projectStatus = this.projectStatusMap().get(node.projectId);
+    return projectStatus === ProjectStatus.ON_HOLD ||
+      projectStatus === ProjectStatus.COMPLETED ||
+      projectStatus === ProjectStatus.CLOSED;
+  }
+
+  private flatten(nodes: TaskNode[]): TaskNode[] {
+    const result: TaskNode[] = [];
+    for (const node of nodes) {
+      result.push(node);
+      if (node.expanded && node.childrenNodes.length > 0) {
+        result.push(...this.flatten(node.childrenNodes));
+      }
+    }
+    return result;
+  }
+
+  private countLeaves(nodes: TaskNode[]): number {
+    let count = 0;
+    for (const node of nodes) {
+      if (!node.hasChildren) count++;
+      if (node.childrenNodes.length > 0) count += this.countLeaves(node.childrenNodes);
+    }
+    return count;
+  }
+
+  private flattenAll(nodes: TaskNode[]): TaskNode[] {
+    const result: TaskNode[] = [];
+    for (const node of nodes) {
+      result.push(node);
+      if (node.childrenNodes.length > 0) {
+        result.push(...this.flattenAll(node.childrenNodes));
+      }
+    }
+    return result;
+  }
+
+  buildAndFilter() {
+    this.hierarchyChange.markForCheck();
+    this.rootNodes = this.buildTree(this.allTasks);
+    this.sortTree(this.rootNodes);
+    const filtered = this.filterTree(this.rootNodes);
+    const visible  = this.flatten(filtered);
+    this.dataSource.data = visible;
+    this.taskCount.set(this.countLeaves(filtered));
+
+    this.kanbanTasks = { TODO: [], IN_PROGRESS: [], IN_REVIEW: [], DONE: [], BLOCKED: [], STOPPED: [] };
+    const allFiltered = this.flattenAll(filtered);
+    for (const task of allFiltered) {
+      // Solo mostrar las tareas "hojas" en el Kanban (las que no tienen subtareas)
+      if (!task.hasChildren) {
+        this.kanbanTasks[task.status].push(task);
+      }
+    }
+    this.reconcileSelection();
+  }
+
+  drop(event: CdkDragDrop<TaskNode[]>) {
+    if (event.previousContainer === event.container) {
+      moveItemInArray(event.container.data, event.previousIndex, event.currentIndex);
+    } else {
+      transferArrayItem(
+        event.previousContainer.data,
+        event.container.data,
+        event.previousIndex,
+        event.currentIndex,
+      );
+
+      const task = event.container.data[event.currentIndex];
+      const newStatus = event.container.id as TaskStatus;
+
+      task.status = newStatus;
+      this.taskService.update(task.id, { ...task, status: newStatus }).subscribe({
+        next: () => {
+          this.flashTaskUpdate(task.id);
+          this.openInfoSnack('Estado actualizado', 'success');
+          this.refresh$.next();
+        },
+        error: (e) => {
+          this.openInfoSnack(e.error?.message || 'Error al actualizar', 'error');
+          this.refresh$.next();
+        },
+      });
+    }
+  }
+
+  handleSort(columnId: string, event: MouseEvent): void {
+    const existingSort = this.sorts.find(s => s.active === columnId);
+
+    if (event.shiftKey) {
+      // ---- ORDENAMIENTO MÚLTIPLE (con Shift) ----
+      if (existingSort) {
+        // La columna ya está en el sort, ciclar dirección o quitarla
+        if (existingSort.direction === 'asc') {
+          existingSort.direction = 'desc';
+        } else {
+          // Si era 'desc', la quitamos del array
+          this.sorts = this.sorts.filter(s => s.active !== columnId);
+        }
+      } else {
+        // No estaba, la añadimos al final con dirección 'asc'
+        this.sorts.push({ active: columnId, direction: 'asc' });
+      }
+    } else {
+      // ---- ORDENAMIENTO SIMPLE (sin Shift) ----
+      if (existingSort) {
+        // Si es la única columna, invertimos dirección. Si no, la establecemos como única.
+        const newDirection = this.sorts.length === 1 && existingSort.direction === 'asc' ? 'desc' : 'asc';
+        this.sorts = [{ active: columnId, direction: newDirection }];
+      } else {
+        // Si no existía, se convierte en el único criterio
+        this.sorts = [{ active: columnId, direction: 'asc' }];
+      }
+    }
+
+    // Si el usuario quita todos los criterios, volvemos al orden por defecto
+    if (this.sorts.length === 0) {
+      this.sorts = [{ active: 'startDate', direction: 'asc' }];
+    }
+
+    this.filterService.saveSortState(this.sorts.map(s => ({ active: s.active, direction: s.direction })));
+    this.buildAndFilter();
+  }
+
+  clearSorting(): void {
+    this.sorts = [{ active: 'startDate', direction: 'asc' }];
+    this.filterService.saveSortState(this.sorts);
+    this.buildAndFilter();
+  }
+
+  private sortTree(nodes: TaskNode[]) {
+    if (this.sorts.length === 0) return;
+
+    nodes.sort((a, b) => {
+      for (const sort of this.sorts) {
+        const { active, direction } = sort;
+        const multiplier = direction === 'asc' ? 1 : -1;
+        const valueA = this.sortValue(a, active);
+        const valueB = this.sortValue(b, active);
+        const comparison = this.compareSortValues(valueA, valueB);
+        if (comparison !== 0) {
+          return comparison * multiplier;
+        }
+      }
+      return 0;
+    });
+
+    for (const node of nodes) {
+      this.sortTree(node.childrenNodes);
+    }
+  }
+
+  private sortValue(node: TaskNode, column: string): string | number | null {
+    switch (column) {
+      case 'title': return node.title;
+      case 'project': return node.projectName ?? '';
+      case 'assignee': return node.assigneeNames?.join(', ') ?? '';
+      case 'status': return this.statusLabels[node.status] ?? node.status;
+      case 'priority': return this.priorityLabels[node.priority] ?? node.priority;
+      case 'startDate': return this.dateSortValue(node.startDate);
+      case 'dueDate': return this.dateSortValue(node.dueDate);
+      case 'progressActual': return node.progressActual ?? 0;
+      case 'progressExpected': return node.progressExpected ?? null;
+      default: return '';
+    }
+  }
+
+  private compareSortValues(a: string | number | null, b: string | number | null): number {
+    if (a == null && b == null) return 0;
+    if (a == null) return 1;
+    if (b == null) return -1;
+    if (typeof a === 'number' && typeof b === 'number') return a - b;
+    return String(a).localeCompare(String(b), 'es', { sensitivity: 'base', numeric: true });
+  }
+
+  private dateSortValue(value?: string): number | null {
+    const date = this.parseLocalDate(value);
+    return date ? date.getTime() : null;
+  }
+
+  // --- Funciones de ayuda para la UI del ordenamiento ---
+
+  getSortDirection(columnId: string): 'asc' | 'desc' | '' {
+    const sort = this.sorts.find(s => s.active === columnId);
+    return sort ? sort.direction : '';
+  }
+
+  getSortOrder(columnId: string): number | null {
+    if (this.sorts.length <= 1) {
+      return null;
+    }
+    const index = this.sorts.findIndex(s => s.active === columnId);
+    return index !== -1 ? index + 1 : null;
+  }
+
+  // ── Expand / collapse ──────────────────────────────────────────────────────
+
+  toggleExpand(node: TaskNode) {
+    // Find the node in the actual tree (not the filtered copy) and toggle
+    const toggle = (nodes: TaskNode[]): boolean => {
+      for (const n of nodes) {
+        if (n.id === node.id) { n.expanded = !n.expanded; return true; }
+        if (toggle(n.childrenNodes)) return true;
+      }
+      return false;
+    };
+    toggle(this.rootNodes);
+    // Volvemos a filtrar y aplanar para mantener el filtro y recalcular hijos
+    const filtered = this.filterTree(this.rootNodes);
+    this.dataSource.data = this.flatten(filtered);
+    this.reconcileSelection();
+  }
+
+  hasExpandableTasks(): boolean {
+    return this.rootNodes.some(node => this.hasChildrenRecursive(node));
+  }
+
+  areAllExpanded(): boolean {
+    const expandable = this.getExpandableNodes(this.rootNodes);
+    return expandable.length > 0 && expandable.every(node => node.expanded);
+  }
+
+  toggleExpandAll() {
+    const expand = !this.areAllExpanded();
+    this.setExpandedRecursive(this.rootNodes, expand);
+    const filtered = this.filterTree(this.rootNodes);
+    this.dataSource.data = this.flatten(filtered);
+    this.reconcileSelection();
+  }
+
+  private hasChildrenRecursive(node: TaskNode): boolean {
+    return node.childrenNodes.length > 0 || node.childrenNodes.some(child => this.hasChildrenRecursive(child));
+  }
+
+  private getExpandableNodes(nodes: TaskNode[]): TaskNode[] {
+    const result: TaskNode[] = [];
+    for (const node of nodes) {
+      if (node.childrenNodes.length > 0) result.push(node);
+      result.push(...this.getExpandableNodes(node.childrenNodes));
+    }
+    return result;
+  }
+
+  private setExpandedRecursive(nodes: TaskNode[], expanded: boolean) {
+    for (const node of nodes) {
+      node.expanded = expanded;
+      this.setExpandedRecursive(node.childrenNodes, expanded);
+    }
+  }
+
+  // ── Filters ────────────────────────────────────────────────────────────────
+
+  applyFilter() { this.buildAndFilter(); }
+
+  clearFilters() {
+    this.filterStatus.set(TASK_STATUSES);
+    this.filterPriority.set(TASK_PRIORITIES);
+    this.filterProject.set(this.activeProjects().map(p => p.id));
+    this.filterAssignee.set(this.members().map(m => m.id));
+    this.buildAndFilter();
+  }
+
+  private isArchivedProjectStatus(status: ProjectStatus): boolean {
+    return status === ProjectStatus.ON_HOLD ||
+      status === ProjectStatus.COMPLETED ||
+      status === ProjectStatus.CLOSED;
+  }
+
+  trackById(index: number, node: TaskNode): number {
+    return node.id;
+  }
+
+  selectedTaskIds = signal<Set<number>>(new Set());
+  selectableTasks(): TaskNode[] {
+    return (this.viewMode === 'table' ? this.dataSource.data : Object.values(this.kanbanTasks).flat()).filter(t => !t.hasChildren);
+  }
+  allVisibleSelected(): boolean {
+    const tasks = this.selectableTasks();
+    return tasks.length > 0 && tasks.every(t => this.selectedTaskIds().has(t.id));
+  }
+  selectTask(id: number, checked: boolean) {
+    this.selectedTaskIds.update(old => { const next = new Set(old); checked ? next.add(id) : next.delete(id); return next; });
+  }
+  selectVisibleTasks(checked: boolean) {
+    this.selectedTaskIds.set(new Set(checked ? this.selectableTasks().slice(0, 500).map(t => t.id) : []));
+  }
+  private reconcileSelection() {
+    const visibleIds = new Set(this.selectableTasks().map(t => t.id));
+    this.selectedTaskIds.update(old => new Set([...old].filter(id => visibleIds.has(id))));
+  }
+  openBulkEdit() {
+    if (this.editingTaskId() !== null || this.editingTitleId() !== null || this.hierarchyBusy()) {
+      this.openInfoSnack('Guarda o cancela la edición actual antes de editar en lote', 'warning'); return;
+    }
+    const tasks = this.selectableTasks().filter(t => this.selectedTaskIds().has(t.id));
+    if (!tasks.length || tasks.length > 500) return;
+    this.dialog.open(TaskBulkDialogComponent, { width: '760px', maxWidth: '96vw', maxHeight: '94vh', data: { tasks, members: this.members() } })
+      .afterClosed().pipe(takeUntilDestroyed(this.destroyRef)).subscribe(result => {
+        if (result) { this.selectedTaskIds.set(new Set()); this.refresh$.next(); this.openInfoSnack(`${result.length} ${result.length === 1 ? 'tarea actualizada' : 'tareas actualizadas'}`, 'success'); }
+      });
+  }
+
+  // ── CRUD ──────────────────────────────────────────────────────────────────
+
+  openCreate(defaultParentId?: number) {
+    this.dialog.open(TaskDialogComponent, {
+      width: '1000px',
+      maxWidth: '95vw',
+      maxHeight: '95vh',
+      data: { task: null, projects: this.activeProjects(), members: this.members(),
+              allTasks: this.allTasks, defaultParentId: defaultParentId ?? null }
+    }).afterClosed().subscribe(result => {
+      if (result) {
+        this.taskService.create(result).subscribe({
+          next:  () => { this.refresh$.next(); this.openInfoSnack('Tarea creada', 'success'); },
+          error: (e) => this.openInfoSnack(e.error?.message || 'Error', 'error')
+        });
+      }
+    });
+  }
+
+  canBeParent(task: TaskNode | Task): boolean {
+    return true;
+  }
+
+  openEdit(task: Task, event?: MouseEvent) {
+    event?.stopPropagation();
+    event?.preventDefault();
+
+    this.dialog.open(TaskDialogComponent, {
+      width: '1000px',
+      maxWidth: '95vw',
+      maxHeight: '95vh',
+      data: { task, projects: this.activeProjects(), members: this.members(), allTasks: this.allTasks }
+    }).afterClosed().subscribe(result => {
+      if (result) {
+        this.taskService.update(task.id, result).subscribe({
+          next:  () => { this.refresh$.next(); this.flashTaskUpdate(task.id); this.openInfoSnack('Tarea actualizada', 'success'); },
+          error: (e) => this.openInfoSnack(e.error?.message || 'Error', 'error')
+        });
+      }
+    });
+  }
+
+  openCommentsDialog(task: Task, event?: MouseEvent) {
+    event?.stopPropagation();
+    event?.preventDefault();
+
+    this.dialog.open(TaskCommentsDialogComponent, {
+      width: '760px',
+      maxWidth: '96vw',
+      maxHeight: '92vh',
+      autoFocus: false,
+      data: { task }
+    });
+  }
+
+  startInlineEdit(task: TaskNode, event?: MouseEvent) {
+    event?.stopPropagation();
+    this.editSub.unsubscribe();
+    this.editSub = new Subscription();
+
+    this.editingTitleId.set(null);
+    this.editingTaskId.set(task.id);
+    this.editParentOptions = this.buildParentOptionsForEdit(task.projectId, task.id);
+
+    this.editForm.reset({
+      title: task.title,
+      description: task.description ?? '',
+      projectId: task.projectId ?? null,
+      parentId: task.parentId ?? null,
+      status: task.status,
+      priority: task.priority,
+      assigneeIds: task.assigneeIds ?? [],
+      startDate: task.startDate ?? null,
+      dueDate: task.dueDate ?? null,
+      progressActual: task.progressActual ?? 0
+    });
+
+    this.syncInlineEditState(task.hasChildren);
+
+    this.editSub.add(
+      this.editForm.get('projectId')!.valueChanges.subscribe(projectId => {
+        this.editParentOptions = this.buildParentOptionsForEdit(projectId ?? null, task.id);
+        const currentParentId = this.editForm.get('parentId')!.value;
+        if (currentParentId != null && !this.editParentOptions.some(p => p.id === currentParentId)) {
+          this.editForm.patchValue({ parentId: null }, { emitEvent: false });
+        }
+      })
+    );
+
+    setTimeout(() => {
+      const input = document.getElementById(`inline-title-${task.id}`) as HTMLInputElement | null;
+      input?.focus();
+      input?.select();
+    });
+  }
+
+  cancelInlineEdit() {
+    this.editSub.unsubscribe();
+    this.editSub = new Subscription();
+    this.editingTaskId.set(null);
+    this.editParentOptions = [];
+  }
+
+  saveInlineEdit(task: TaskNode) {
+    if (this.editingTaskId() !== task.id || this.editForm.invalid) {
+      return;
+    }
+
+    const v = this.editForm.getRawValue() as TaskEditFormValue;
+    const req = this.buildTaskRequestFromValues(task, v);
+
+    this.taskService.update(task.id, req).subscribe({
+      next: () => {
+        this.refresh$.next();
+        this.flashTaskUpdate(task.id);
+        this.cancelInlineEdit();
+        this.openInfoSnack('Tarea actualizada', 'success');
+      },
+      error: (e) => this.openInfoSnack(e.error?.message || 'Error al actualizar', 'error')
+    });
+  }
+
+  updateProgress(node: TaskNode, event: Event) {
+    const input = event.target as HTMLInputElement;
+    const newProgress = parseInt(input.value, 10);
+    if (isNaN(newProgress)) {
+      input.value = String(node.progressActual);
+      return;
+    }
+    const progressActual = Math.max(0, Math.min(100, newProgress));
+    if (node.progressActual === progressActual) {
+      input.value = String(progressActual);
+      return;
+    }
+
+    const startDateRaw = node.startDate ? this.parseLocalDate(node.startDate) : null;
+    const dueDateRaw = node.dueDate ? this.parseLocalDate(node.dueDate) : null;
+
+    const req: TaskRequest = {
+      title: node.title,
+      description: node.description,
+      status: node.status,
+      priority: node.priority,
+      projectId: node.projectId ?? undefined,
+      assigneeIds: node.assigneeIds && node.assigneeIds.length > 0 ? node.assigneeIds : undefined,
+      startDate: startDateRaw ? this.formatLocalDate(startDateRaw) : undefined,
+      dueDate: dueDateRaw ? this.formatLocalDate(dueDateRaw) : undefined,
+      progressActual: progressActual,
+      parentId: node.parentId ?? undefined
+    };
+
+    this.taskService.update(node.id, req).subscribe({
+      next:  () => { this.refresh$.next(); this.snack.open('Avance actualizado', 'OK', { duration: 2000 }); },
+      error: (e) => {
+        input.value = String(node.progressActual);
+        this.snack.open(e.error?.message || 'Error al actualizar', 'OK', { duration: 3000 });
+      }
+    });
+  }
+
+  startEditingTitle(node: TaskNode, event: MouseEvent) {
+    event.stopPropagation();
+    this.editingTitleId.set(node.id);
+    queueMicrotask(() => {
+      const input = this.titleInputRefs.find(ref => ref.nativeElement.id === `title-input-${node.id}`)?.nativeElement;
+      input?.focus();
+      input?.select();
+    });
+  }
+
+  cancelTitleEdit() {
+    this.editingTitleId.set(null);
+  }
+
+  updateTitle(node: TaskNode, event: Event) {
+    const input = event.target as HTMLInputElement;
+    const newTitle = input.value.trim();
+
+    if (this.editingTitleId() !== node.id) return; // Prevenir guardados duplicados
+    this.editingTitleId.set(null);
+
+    if (!newTitle || newTitle === node.title) return;
+
+    const startDateRaw = node.startDate ? this.parseLocalDate(node.startDate) : null;
+    const dueDateRaw = node.dueDate ? this.parseLocalDate(node.dueDate) : null;
+
+    const req: TaskRequest = {
+      title: newTitle,
+      description: node.description,
+      status: node.status,
+      priority: node.priority,
+      projectId: node.projectId ?? undefined,
+      assigneeIds: node.assigneeIds && node.assigneeIds.length > 0 ? node.assigneeIds : undefined,
+      startDate: startDateRaw ? this.formatLocalDate(startDateRaw) : undefined,
+      dueDate: dueDateRaw ? this.formatLocalDate(dueDateRaw) : undefined,
+      progressActual: node.progressActual ?? 0,
+      parentId: node.parentId ?? undefined,
+    };
+
+    this.taskService.update(node.id, req).subscribe({
+      next:  () => {
+        this.refresh$.next();
+        this.flashTaskUpdate(node.id);
+        this.openInfoSnack('Título actualizado', 'success');
+      },
+      error: (e) => this.openInfoSnack(e.error?.message || 'Error al actualizar', 'error')
+    });
+  }
+
+  changeStatus(task: Task, status: TaskStatus) {
+    this.taskService.update(task.id, this.buildTaskUpdatePayload(task, { status })).subscribe({
+      next:  () => {
+        this.refresh$.next();
+        this.flashTaskUpdate(task.id);
+        this.openInfoSnack('Estado actualizado', 'success');
+      },
+      error: (e) => this.openInfoSnack(e.error?.message || 'Error', 'error')
+    });
+  }
+
+  changePriority(task: Task, priority: TaskPriority) {
+    this.taskService.update(task.id, this.buildTaskUpdatePayload(task, { priority })).subscribe({
+      next:  () => {
+        this.refresh$.next();
+        this.flashTaskUpdate(task.id);
+        this.openInfoSnack('Prioridad actualizada', 'success');
+      },
+      error: (e) => this.openInfoSnack(e.error?.message || 'Error', 'error')
+    });
+  }
+
+  commentCount(task: Task): number {
+    return task.comments?.length ?? 0;
+  }
+
+  commentTriggerLabel(task: Task): string {
+    const count = this.commentCount(task);
+    return count > 0 ? String(count) : 'Comentar';
+  }
+
+  commentTriggerIcon(task: Task): string {
+    return this.commentCount(task) > 0 ? 'forum' : 'add_comment';
+  }
+
+  commentTriggerTooltip(task: Task): string {
+    const count = this.commentCount(task);
+    if (count === 1) {
+      return '1 comentario';
+    }
+    return count > 1 ? `${count} comentarios` : 'Abrir comentarios';
+  }
+
+  confirmDelete(task: Task) {
+    this.dialog.open(ConfirmDialogComponent, {
+      data: { message: `¿Eliminar la tarea "${task.title}"?` +
+        (task.hasChildren ? '\n\nLas subtareas quedarán como tareas raíz.' : '') }
+    }).afterClosed().subscribe(confirmed => {
+      if (confirmed) {
+        this.taskService.delete(task.id).subscribe({
+          next:  () => { this.refresh$.next(); this.openInfoSnack('Tarea eliminada', 'success'); },
+          error: (e) => this.openInfoSnack(e.error?.message || 'Error', 'error')
+        });
+      }
+    });
+  }
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
+
+  isTaskOverdue(task: Task): boolean {
+    if (!task.dueDate || task.status === 'DONE' || task.progressActual >= 100) return false;
+    const dueDate = this.parseLocalDate(task.dueDate);
+    if (!dueDate) return false;
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    return dueDate < today;
+  }
+
+  // Determina si la fila de una tarea debe resaltarse como crítica (rojo)
+  // Esto incluye tareas bloqueadas o vencidas, o si alguna de sus subtareas lo está.
+  isRowCritical(node: TaskNode): boolean {
+    // Si la tarea está COMPLETED, no se considera crítica para el resaltado de fila
+    if (node.status === 'DONE') {
+      return false;
+    }
+
+    // Si la tarea está BLOQUEADA, es crítica
+    if (node.status === 'BLOCKED') {
+      return true;
+    }
+
+    // Si la tarea está vencida, es crítica
+    if (this.isTaskOverdue(node)) {
+      return true;
+    }
+
+    // Recursivamente, si alguna subtarea es crítica, entonces esta tarea padre también lo es
+    return node.childrenNodes?.some(child => this.isRowCritical(child)) ?? false;
+  }
+
+
+  progressStatus(task: Task): 'on-track' | 'at-risk' | 'behind' | 'done' | 'no-date' {
+    if (task.status === 'DONE') return 'done';
+    if (task.progressExpected === null || task.progressExpected === undefined) return 'no-date';
+    const diff = (task.progressActual ?? 0) - task.progressExpected;
+    if (diff >= 0)   return 'on-track';
+    if (diff >= -15) return 'at-risk';
+    return 'behind';
+  }
+
+  progressIcon(task: Task): string {
+    const s = this.progressStatus(task);
+    if (s === 'done')     return 'check_circle';
+    if (s === 'on-track') return 'check_circle';
+    if (s === 'at-risk')  return 'warning';
+    if (s === 'behind')   return 'error';
+    return '';
+  }
+
+  private buildTaskUpdatePayload(task: Task, overrides: Partial<{ status: TaskStatus; priority: TaskPriority }>): TaskRequest {
+    return this.buildTaskRequestFromValues(task, {
+      title: task.title,
+      description: task.description ?? '',
+      projectId: task.projectId ?? null,
+      parentId: task.parentId ?? null,
+      status: overrides.status ?? task.status,
+      priority: overrides.priority ?? task.priority,
+      assigneeIds: task.assigneeIds ?? [],
+      startDate: task.startDate ?? null,
+      dueDate: task.dueDate ?? null,
+      progressActual: task.progressActual ?? 0
+    });
+  }
+
+  private buildTaskRequestFromValues(task: Task, values: TaskEditFormValue): TaskRequest {
+    return {
+      title: values.title?.trim() || task.title,
+      description: values.description?.trim() || undefined,
+      status: values.status,
+      priority: values.priority,
+      projectId: values.projectId ?? undefined,
+      assigneeIds: values.assigneeIds && values.assigneeIds.length > 0 ? values.assigneeIds : undefined,
+      startDate: values.startDate || undefined,
+      dueDate: values.dueDate || undefined,
+      progressActual: Math.max(0, Math.min(100, Number(values.progressActual ?? 0))),
+      parentId: values.parentId ?? undefined
+    };
+  }
+
+  getTaskTitle(taskId: number | null | undefined): string {
+    if (taskId == null) {
+      return '';
+    }
+    return this.allTasks.find(task => task.id === taskId)?.title ?? '';
+  }
+
+  private syncInlineEditState(hasChildren: boolean) {
+    const toggle = (controlName: keyof TaskEditFormValue, enabled: boolean) => {
+      const control = this.editForm.get(String(controlName));
+      if (!control) return;
+      if (enabled) {
+        control.enable({ emitEvent: false });
+      } else {
+        control.disable({ emitEvent: false });
+      }
+    };
+
+    toggle('status', !hasChildren);
+    toggle('priority', !hasChildren);
+    toggle('assigneeIds', !hasChildren);
+    toggle('startDate', !hasChildren);
+    toggle('dueDate', !hasChildren);
+    toggle('progressActual', !hasChildren);
+  }
+
+  private buildParentOptionsForEdit(projectId: number | null | undefined, editingId: number): (TaskNode & { _level?: number })[] {
+    if (!projectId) {
+      return [];
+    }
+
+    const excludedIds = this.getTaskAndDescendantIds(editingId);
+    const all = this.allTasks.filter(t => t.projectId === projectId && !excludedIds.has(t.id));
+    const childCounts = new Map<number, number>();
+
+    for (const task of all) {
+      childCounts.set(task.id, 0);
+    }
+    for (const task of all) {
+      if (task.parentId != null && childCounts.has(task.parentId)) {
+        childCounts.set(task.parentId, (childCounts.get(task.parentId) ?? 0) + 1);
+      }
+    }
+
+    const eligibleTasks = all;
+    const map = new Map<number, TaskNode & { _level?: number; _children: number[] }>();
+    const roots: number[] = [];
+
+    for (const task of eligibleTasks) {
+      map.set(task.id, { ...(task as TaskNode), _level: 0, _children: [] });
+    }
+
+    for (const node of map.values()) {
+      if (node.parentId != null && map.has(node.parentId)) {
+        map.get(node.parentId)!._children.push(node.id);
+      } else {
+        roots.push(node.id);
+      }
+    }
+
+    const result: (TaskNode & { _level?: number })[] = [];
+    const walk = (ids: number[], level: number) => {
+      for (const id of ids) {
+        const node = map.get(id)!;
+        node._level = level;
+        result.push(node);
+        walk(node._children, level + 1);
+      }
+    };
+    walk(roots, 0);
+    return result;
+  }
+
+  private getTaskAndDescendantIds(taskId: number): Set<number> {
+    const excluded = new Set<number>([taskId]);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const task of this.allTasks) {
+        if (task.parentId != null && excluded.has(task.parentId) && !excluded.has(task.id)) {
+          excluded.add(task.id);
+          changed = true;
+        }
+      }
+    }
+    return excluded;
+  }
+
+  // ── Bulk actions ──────────────────────────────────────────────────────────
+
+  private parseLocalDate(value?: string): Date | null {
+    return parseIsoDateLike(value);
+  }
+
+  private formatLocalDate(date: Date): string {
+    return formatDateYmd(date);
+  }
+
+  confirmDeleteAll() {
+    this.dialog.open(ConfirmDialogComponent, {
+      data: { message: '⚠ Esta acción eliminará TODAS las tareas del sistema sin excepción.\n\nEsto es irreversible. ¿Desea continuar?' }
+    }).afterClosed().subscribe(confirmed => {
+      if (!confirmed) return;
+      // Second confirmation for extra safety
+      this.dialog.open(ConfirmDialogComponent, {
+        data: { message: '¿Está completamente seguro? Se borrarán todas las tareas y sus subtareas.' }
+      }).afterClosed().subscribe(confirmed2 => {
+        if (!confirmed2) return;
+        this.taskService.deleteAll().subscribe({
+          next: () => {
+            this.allTasks = [];
+            this.rootNodes = [];
+            this.dataSource.data = [];
+            this.taskCount.set(0);
+            this.openInfoSnack('Todas las tareas fueron eliminadas', 'warning');
+          },
+          error: (e) => this.openInfoSnack(e.error?.message || 'Error al eliminar', 'error')
+        });
+      });
+    });
+  }
+
+  exportingExcel = false;
+  async exportView() {
+    if (this.exportingExcel) return;
+    const visibleTasks = [...this.dataSource.data];
+    if (!visibleTasks.length) {
+      this.openInfoSnack('No hay tareas en la vista actual para exportar', 'warning');
+      return;
+    }
+    this.exportingExcel = true;
+    try {
+      const blob = await firstValueFrom(this.taskService.exportView(visibleTasks.map(t => ({ id: t.id, level: t.level || 0 }))));
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `tasktracker_tareas_${this.formatLocalDate(new Date())}.xlsx`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      this.openInfoSnack(`Excel generado con ${visibleTasks.length} tareas`, 'info');
+    } catch {
+      this.openInfoSnack('No se pudo generar el Excel. Vuelve a intentarlo.', 'warning');
+    } finally {
+      this.exportingExcel = false;
+      this.hierarchyChange.markForCheck();
+    }
+  }
+
+  exportPdf() {
+    const visibleTasks = this.dataSource.data;
+    if (visibleTasks.length === 0) {
+      this.openInfoSnack('No hay tareas en la vista actual para exportar a PDF', 'warning');
+      return;
+    }
+
+    const report = new ReportPdf('Vista de tareas', 'Vista actual: se conserva el orden y la jerarquía de las tareas.', [
+      { label: 'Tareas en la vista', value: visibleTasks.length },
+      { label: 'Completadas', value: visibleTasks.filter(t => t.status === 'DONE').length },
+      { label: 'Bloqueadas', value: visibleTasks.filter(t => t.status === 'BLOCKED').length },
+    ]);
+    const head = [['Título', 'Proyecto', 'Asignado', 'Estado', 'Prioridad', 'Inicio', 'Venc.', '% Real', '% Esp.']];
+
+    const body = visibleTasks.map(node => {
+      const title = node.title;
+      const project = node.projectName ?? '';
+      const assignee = node.assigneeNames?.join(', ') ?? '';
+      const status = this.statusLabels[node.status] ?? node.status;
+      const priority = this.priorityLabels[node.priority] ?? node.priority;
+      const startDate = node.startDate ? (this.parseLocalDate(node.startDate)?.toLocaleDateString('es-ES') || '') : '';
+      const dueDate = node.dueDate ? (this.parseLocalDate(node.dueDate)?.toLocaleDateString('es-ES') || '') : '';
+      const progressActual = node.progressActual != null ? `${node.progressActual}%` : '';
+      const progressExpected = node.progressExpected != null ? `${node.progressExpected}%` : '';
+
+      return [title, project, assignee, status, priority, startDate, dueDate, progressActual, progressExpected];
+    });
+
+    report.table('Detalle de tareas', head[0], body, {
+      styles: { font: 'helvetica', fontSize: 8, cellPadding: 2.5, overflow: 'linebreak', textColor: [12, 46, 66] },
+      columnStyles: { 0: { cellWidth: 65 }, 1: { cellWidth: 32 }, 2: { cellWidth: 34 },
+        5: { cellWidth: 23 }, 6: { cellWidth: 23 }, 7: { halign: 'right' }, 8: { halign: 'right' } },
+      didParseCell: data => {
+        if (data.section !== 'body') return;
+        const task = visibleTasks[data.row.index];
+        if (!task) return;
+        if (data.column.index === 0) data.cell.styles.cellPadding = { top: 3, bottom: 3, right: 3, left: 3 + (task.level || 0) * 3 };
+        if (data.column.index === 3 && task.status === 'BLOCKED') data.cell.styles.textColor = [185, 28, 28];
+        if (data.column.index === 3 && task.status === 'DONE') data.cell.styles.textColor = [22, 101, 52];
+      },
+    });
+
+    const today = this.formatLocalDate(new Date());
+    report.finish().save(`tasktracker_tareas_${today}.pdf`);
+  }
+
+  exportTasks() {
+    // Export ALL tasks for backup purposes, not just the visible ones.
+    const tasksToExport = this.allTasks;
+
+    if (tasksToExport.length === 0) {
+      this.openInfoSnack('No hay tareas para exportar', 'warning');
+      return;
+    }
+
+    // Create maps for quick lookup of project names and member emails
+    const projectMap = new Map<number, string>(this.projects().map(p => [p.id, p.name]));
+    const memberMap = new Map<number, string>();
+    this.members().forEach(m => {
+      if (m.email) { // Ensure email exists
+        memberMap.set(m.id, m.email);
+      }
+    });
+
+    // Headers that match the import template format
+    const headers = [
+      'ID', 'Parent_ID', 'Title', 'Description', 'Project',
+      'Assignees (emails)', 'Status', 'Priority', 'Start_Date',
+      'Due_Date', 'Progress_Actual'
+    ];
+
+    const rows = tasksToExport.map(task => {
+      const escapeCsv = (val: string | number | null | undefined) => {
+        const str = String(val ?? '');
+        // Si el string contiene el separador (|), una comilla, o un salto de línea, lo encerramos entre comillas.
+        if (/[|\",\n\r]/.test(str)) {
+          return `"${str.replace(/"/g, '""')}"`;
+        }
+        return str;
+      };
+
+      const id = task.id;
+      const parentId = task.parentId ?? '';
+      const title = escapeCsv(task.title);
+      const description = escapeCsv(task.description);
+      const project = escapeCsv(task.projectId ? projectMap.get(task.projectId) : '');
+      const assignees = escapeCsv(task.assigneeIds?.map(id => memberMap.get(id)).filter(Boolean).join(';') ?? '');
+      const status = task.status;
+      const priority = task.priority;
+      const startDate = task.startDate ?? '';
+      const dueDate = task.dueDate ?? '';
+      const progressActual = task.progressActual ?? 0;
+
+      return [id, parentId, title, description, project, assignees, status, priority, startDate, dueDate, progressActual].join('|');
+    });
+
+    const csvContent = '\uFEFF' + [headers.join('|'), ...rows].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const today = this.formatLocalDate(new Date());
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `tasktracker_tasks_backup_${today}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+    this.openInfoSnack(`Exportando ${tasksToExport.length} tareas para respaldo...`, 'info');
+  }
+
+  // ── Excel ─────────────────────────────────────────────────────────────────
+
+  downloadTemplate() {
+    this.taskService.downloadTemplate().subscribe(blob => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'plantilla_tareas.csv'; a.click();
+      URL.revokeObjectURL(url);
+    });
+  }
+
+  triggerImport() { this.fileInputRef.nativeElement.click(); }
+
+  onFileSelected(event: Event) {
+    const input = event.target as HTMLInputElement;
+    const file  = input.files?.[0];
+    if (!file) return;
+    input.value = '';
+
+    this.taskService.importExcel(file).subscribe({
+      next: (result: ImportResult) => {
+        this.refresh$.next();
+        const msg = `${result.imported} tarea(s) importada(s)` +
+          (result.skipped ? `, ${result.skipped} omitida(s)` : '');
+        this.openInfoSnack(msg, 'success');
+        if (result.warnings.length > 0) {
+          this.dialog.open(ImportWarningsDialogComponent, { width: '520px', data: result.warnings });
+        }
+      },
+      error: (e) => this.openInfoSnack(e.error?.message || 'Error al importar', 'error')
+    });
+  }
+}
+
+@Component({
+  selector: 'app-import-warnings-dialog',
+  imports: [MatDialogModule, MatButtonModule],
+  template: `
+    <h2 mat-dialog-title>Advertencias de importación</h2>
+    <mat-dialog-content>
+      <ul style="margin:0;padding-left:18px;line-height:1.8">
+        @for (w of data; track w) { <li style="font-size:13px;color:#475569">{{ w }}</li> }
+      </ul>
+    </mat-dialog-content>
+    <mat-dialog-actions align="end">
+      <button mat-flat-button color="primary" mat-dialog-close>Entendido</button>
+    </mat-dialog-actions>
+  `
+})
+export class ImportWarningsDialogComponent {
+  data: string[] = inject(MAT_DIALOG_DATA);
+}
